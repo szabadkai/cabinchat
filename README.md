@@ -20,6 +20,15 @@ go build -o cabinchat .
 ./cabinchat
 ```
 
+## macOS: Removing Quarantine
+
+Downloaded binaries are blocked by Gatekeeper. To fix:
+
+```bash
+xattr -d com.apple.quarantine cabinchat-darwin-arm64
+chmod +x cabinchat-darwin-arm64
+```
+
 ## Building for All Platforms
 
 ```bash
