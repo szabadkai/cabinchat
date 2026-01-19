@@ -28,11 +28,12 @@ type PendingOffer struct {
 
 // Host manages the chat room server
 type Host struct {
-	listener      net.Listener
-	clients       map[net.Conn]*Client
-	mutex         sync.RWMutex
-	nick          string
-	pendingOffers map[string]*PendingOffer // key: "sender->recipient"
+	listener        net.Listener
+	clients         map[net.Conn]*Client
+	mutex           sync.RWMutex
+	nick            string
+	pendingOffers   map[string]*PendingOffer // key: sender nick
+	hostPendingFile *PendingOffer            // incoming file offer for host
 }
 
 // NewHost creates a new chat host
@@ -142,50 +143,75 @@ func (h *Host) handleClient(conn net.Conn) {
 			SendMessage(conn, Message{Type: MsgTypeUserList, Text: users})
 
 		case MsgTypeFileOffer:
-			// Store the offer and forward to recipient
+			// Store the offer and forward to recipient(s)
 			offerMsg := Message{Type: MsgTypeFileOffer, Nick: client.nick, Text: msg.Text, Data: msg.Data}
+			// Store by sender nick only - any recipient can accept
+			h.pendingOffers[client.nick] = &PendingOffer{
+				SenderNick:    client.nick,
+				SenderConn:    conn,
+				Filename:      msg.Text,
+				RecipientNick: msg.Target, // may be empty for broadcast
+			}
 			if msg.Target != "" {
-				// Targeted offer
-				key := fmt.Sprintf("%s->%s", client.nick, msg.Target)
-				h.pendingOffers[key] = &PendingOffer{
-					SenderNick:    client.nick,
-					SenderConn:    conn,
-					Filename:      msg.Text,
-					RecipientNick: msg.Target,
+				if msg.Target == h.nick {
+					// Targeted offer to host
+					h.hostPendingFile = &PendingOffer{
+						SenderNick: client.nick,
+						SenderConn: conn,
+						Filename:   msg.Text,
+					}
+					PlayBell()
+					fmt.Printf("\n-> %s wants to send you: %s (%s)\n", client.nick, msg.Text, msg.Data)
+					fmt.Println("   Type /accept or /reject")
+				} else {
+					h.sendToNick(msg.Target, offerMsg)
+					fmt.Printf("-> %s offers %s to %s\n", client.nick, msg.Text, msg.Target)
 				}
-				h.sendToNick(msg.Target, offerMsg)
-				fmt.Printf("-> %s offers %s to %s\n", client.nick, msg.Text, msg.Target)
 			} else {
-				// Broadcast offer - simplified: just forward to all
+				// Broadcast offer to all clients
 				h.broadcast(offerMsg, conn)
-				fmt.Printf("-> %s offers %s to everyone\n", client.nick, msg.Text)
+				// Also track for host
+				h.hostPendingFile = &PendingOffer{
+					SenderNick: client.nick,
+					SenderConn: conn,
+					Filename:   msg.Text,
+				}
+				PlayBell()
+				fmt.Printf("\n-> %s wants to send you: %s (%s)\n", client.nick, msg.Text, msg.Data)
+				fmt.Println("   Type /accept or /reject")
 			}
 
 		case MsgTypeFileAcc:
 			// Recipient accepted - tell sender to send the file
-			key := fmt.Sprintf("%s->%s", msg.Text, client.nick) // msg.Text = sender nick
-			if offer, ok := h.pendingOffers[key]; ok {
-				// Tell sender their offer was accepted
+			senderNick := msg.Text // msg.Text = sender nick they're accepting from
+			if offer, ok := h.pendingOffers[senderNick]; ok {
+				// Tell sender their offer was accepted, include who accepted
 				SendMessage(offer.SenderConn, Message{Type: MsgTypeFileAcc, Nick: client.nick, Text: offer.Filename})
-				delete(h.pendingOffers, key)
-				fmt.Printf("-> %s accepted file from %s\n", client.nick, msg.Text)
+				delete(h.pendingOffers, senderNick)
+				fmt.Printf("-> %s accepted file from %s\n", client.nick, senderNick)
 			}
 
 		case MsgTypeFileRej:
 			// Recipient rejected
-			key := fmt.Sprintf("%s->%s", msg.Text, client.nick)
-			if offer, ok := h.pendingOffers[key]; ok {
+			senderNick := msg.Text
+			if offer, ok := h.pendingOffers[senderNick]; ok {
 				SendMessage(offer.SenderConn, Message{Type: MsgTypeFileRej, Nick: client.nick})
-				delete(h.pendingOffers, key)
-				fmt.Printf("-> %s rejected file from %s\n", client.nick, msg.Text)
+				delete(h.pendingOffers, senderNick)
+				fmt.Printf("-> %s rejected file from %s\n", client.nick, senderNick)
 			}
 
 		case MsgTypeFile:
 			// Actual file data - route to target or broadcast
 			fileMsg := Message{Type: MsgTypeFile, Nick: client.nick, Text: msg.Text, Data: msg.Data}
 			if msg.Target != "" {
-				h.sendToNick(msg.Target, fileMsg)
-				fmt.Printf("-> %s sent file %s to %s\n", client.nick, msg.Text, msg.Target)
+				if msg.Target == h.nick {
+					// Sent to host
+					PlayBell()
+					hostSaveFile(msg.Text, msg.Data, client.nick)
+				} else {
+					h.sendToNick(msg.Target, fileMsg)
+					fmt.Printf("-> %s sent file %s to %s\n", client.nick, msg.Text, msg.Target)
+				}
 			} else {
 				PlayBell()
 				hostSaveFile(msg.Text, msg.Data, client.nick)
@@ -375,6 +401,25 @@ func (h *Host) hostInputLoop() {
 			}
 			if result.FilePicker {
 				h.hostPickAndSendFile()
+			}
+			if result.AcceptFile {
+				if h.hostPendingFile != nil {
+					// Tell sender to send the file to us
+					SendMessage(h.hostPendingFile.SenderConn, Message{Type: MsgTypeFileAcc, Nick: h.nick, Text: h.hostPendingFile.Filename})
+					fmt.Printf("-> Accepted file from %s\n", h.hostPendingFile.SenderNick)
+					h.hostPendingFile = nil
+				} else {
+					fmt.Println("No pending file to accept")
+				}
+			}
+			if result.RejectFile {
+				if h.hostPendingFile != nil {
+					SendMessage(h.hostPendingFile.SenderConn, Message{Type: MsgTypeFileRej, Nick: h.nick})
+					fmt.Printf("-> Rejected file from %s\n", h.hostPendingFile.SenderNick)
+					h.hostPendingFile = nil
+				} else {
+					fmt.Println("No pending file to reject")
+				}
 			}
 			if result.Message != nil {
 				fmt.Printf("[%s]: %s\n", result.Message.Nick, result.Message.Text)
