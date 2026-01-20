@@ -1,64 +1,65 @@
 package media
 
 import (
-	"bytes"
 	"fmt"
-	"image/jpeg"
-	"time"
 
-	"github.com/kbinani/screenshot"
-	"github.com/nfnt/resize"
-	"github.com/pion/webrtc/v3"
+	"github.com/pion/mediadevices"
+	"github.com/pion/mediadevices/pkg/codec/vpx"
+	"github.com/pion/mediadevices/pkg/prop"
+	"github.com/pion/webrtc/v4"
+
+	// Import screen capture driver
+	_ "github.com/pion/mediadevices/pkg/driver/screen"
 )
 
-// StartScreenShare captures screen and sends JPEG frames over DataChannel
+var screenTrack mediadevices.Track
+
+// GetScreenTrack returns a VP8 encoded video track for screen sharing
+func GetScreenTrack() (webrtc.TrackLocal, error) {
+	// Configure VP8 encoder
+	vpxParams, err := vpx.NewVP8Params()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create VP8 params: %w", err)
+	}
+	vpxParams.BitRate = 1_500_000 // 1.5 Mbps for good quality
+
+	codecSelector := mediadevices.NewCodecSelector(
+		mediadevices.WithVideoEncoders(&vpxParams),
+	)
+
+	// Get screen capture stream
+	stream, err := mediadevices.GetDisplayMedia(mediadevices.MediaStreamConstraints{
+		Video: func(c *mediadevices.MediaTrackConstraints) {
+			c.FrameRate = prop.Float(15) // 15 FPS
+			c.Width = prop.Int(1280)
+			c.Height = prop.Int(720)
+		},
+		Codec: codecSelector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get display media: %w", err)
+	}
+
+	tracks := stream.GetVideoTracks()
+	if len(tracks) == 0 {
+		return nil, fmt.Errorf("no video tracks in stream")
+	}
+
+	screenTrack = tracks[0]
+
+	// mediadevices.Track implements webrtc.TrackLocal interface
+	return screenTrack, nil
+}
+
+// StopScreenShare stops the screen capture
+func StopScreenShare() {
+	if screenTrack != nil {
+		screenTrack.Close()
+		screenTrack = nil
+	}
+}
+
+// StartScreenShare is kept for backwards compatibility but now uses VP8
 func StartScreenShare(dc *webrtc.DataChannel) {
-	go func() {
-		ticker := time.NewTicker(100 * time.Millisecond) // 10 FPS
-		defer ticker.Stop()
-
-		for range ticker.C {
-			if dc.ReadyState() != webrtc.DataChannelStateOpen {
-				return
-			}
-
-			// Capture primary display
-			bounds := screenshot.GetDisplayBounds(0)
-			img, err := screenshot.CaptureRect(bounds)
-			if err != nil {
-				fmt.Printf("Capture error: %v\n", err)
-				continue
-			}
-
-			// Resize to reasonable size (e.g., width 800) to reduce bandwidth
-			// Maintain aspect ratio
-			resized := resize.Resize(800, 0, img, resize.Lanczos3)
-
-			// Encode to JPEG
-			var buf bytes.Buffer
-			if err := jpeg.Encode(&buf, resized, &jpeg.Options{Quality: 70}); err != nil {
-				fmt.Printf("JPEG Encode error: %v\n", err)
-				continue
-			}
-
-			// Send over DataChannel
-			// Note: DataChannels have a max message size (typ 64KB or 256KB depending on impl)
-			// JPEGs might be larger. We might need to chunk.
-			// For 800px width ~70 quality, it should be < 64KB usually.
-			// Let's implement simple chunking if needed or rely on Pion handling it (Pion DC supports larger messages by chunking internally? No, usually you handled it)
-			// For simplicity we try to send as one unless error.
-
-			data := buf.Bytes()
-			if len(data) > 60000 {
-				// Too big for single message safety zone?
-				// Just skip frame or assume Pion handles fragmentation (SCTP layer does).
-				// Pion SCTP supports fragmentation. Open returns a DetachedDataChannel which is a ReadWriteCloser.
-				// But here we have *webrtc.DataChannel.
-			}
-
-			if err := dc.Send(data); err != nil {
-				// fmt.Printf("Send error: %v\n", err)
-			}
-		}
-	}()
+	fmt.Println("Warning: StartScreenShare with DataChannel is deprecated. Use GetScreenTrack instead.")
 }

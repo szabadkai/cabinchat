@@ -11,7 +11,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
-	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v4"
 )
 
 // SignalMessage represents the JSON payload in a MsgTypeWebRTC
@@ -110,7 +110,7 @@ func (m *MediaManager) createPeerConnection() error {
 			// Alternative: "Screensharing" sends screenshots via DataChannel or just low framerate images?
 			// The USER asked for "screensharing". WebRTC Video Track is the standard way.
 			// To render it in Fyne, we need to decode the frames.
-			// We can use `github.com/pion/webrtc/v3/pkg/media/ivfwriter` to dump to file,
+			// We can use `github.com/pion/webrtc/v4/pkg/media/ivfwriter` to dump to file,
 			// or use `vpx-go` bindings? No, stick to pure Go if possible.
 			// Maybe just Audio for now and basic stub for Video?
 			// Or finding a way to display it.
@@ -131,14 +131,17 @@ func (m *MediaManager) createPeerConnection() error {
 			d.OnMessage(func(msg webrtc.DataChannelMessage) {
 				img, err := jpeg.Decode(bytes.NewReader(msg.Data))
 				if err == nil {
-					// Update UI
-					// We need a thread-safe way to update the image
-					if m.remoteVideo == nil {
-						m.createVideoCanvas()
-					}
-					m.remoteVideo.Image = img
-					m.remoteVideo.Refresh()
-					m.mediaWindow.Show() // Ensure visible
+					// Update UI on main thread
+					fyne.Do(func() {
+						if m.remoteVideo == nil {
+							m.createVideoCanvas()
+						}
+						m.remoteVideo.Image = img
+						m.remoteVideo.Refresh()
+						if m.mediaWindow != nil {
+							m.mediaWindow.Show()
+						}
+					})
 				}
 			})
 		}
@@ -203,15 +206,16 @@ func (m *MediaManager) startSession(target string, shareScreen bool) {
 	// Start Audio Capture
 	go StartAudioCapture(audioTrack)
 
-	// If sharing screen, create DataChannel
+	// If sharing screen, add video track
 	if shareScreen {
-		dc, err := m.peerConnection.CreateDataChannel("screen", nil)
+		videoTrack, err := GetScreenTrack()
 		if err != nil {
-			fmt.Printf("Error creating DC: %v\n", err)
+			fmt.Printf("Error getting screen track: %v\n", err)
 		} else {
-			dc.OnOpen(func() {
-				StartScreenShare(dc)
-			})
+			_, err = m.peerConnection.AddTrack(videoTrack)
+			if err != nil {
+				fmt.Printf("Error adding video track: %v\n", err)
+			}
 		}
 	}
 
