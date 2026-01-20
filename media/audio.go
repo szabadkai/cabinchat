@@ -87,7 +87,7 @@ func StartAudioPlayback(track *webrtc.TrackRemote) error {
 
 	// Goroutine to read from WebRTC track
 	go func() {
-		buf := make([]byte, 4096)
+		buf := make([]byte, 16384) // 16KB buffer for RTP packets
 		for {
 			n, _, err := track.Read(buf)
 			if err != nil {
